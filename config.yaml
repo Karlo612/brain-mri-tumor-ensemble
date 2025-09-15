@@ -1,0 +1,23 @@
+# ---------- General ----------
+seed: 42
+img_size: [224, 224]
+batch_size: 32
+val_split: 0.15   # kept for compatibility; ignored because val dir exists
+class_mode: categorical
+
+# ---------- Directories ----------
+data_dir: /content/drive/MyDrive/Final_2025_Comp/SP/dataset_brain_split
+model_dir: /content/drive/MyDrive/Final_2025_Comp/SP/models
+log_dir: /content/drive/MyDrive/Final_2025_Comp/SP/models/logs
+plot_dir: /content/drive/MyDrive/Final_2025_Comp/SP/plots
+
+# ---------- Training ----------
+epochs_head: 15
+epochs_finetune: 20
+unfreeze_layers: 30
+lr_head: 1.0e-3
+lr_finetune: 1.0e-4
+early_stop_patience: 4
+
+# ---------- Ensemble ----------
+backbones: [xception, vgg16, efficientnetb0]
