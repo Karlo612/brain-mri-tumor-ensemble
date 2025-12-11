@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 **Final Year Synoptic Project | Manchester Metropolitan University**  
-6G6Z0019 - Creative Piece | Student ID: 19003070
+Creative Piece 
 
 ---
 
