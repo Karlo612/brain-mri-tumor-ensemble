@@ -1,1 +1,13 @@
 __pycache__/\n*.pyc
+outputs/
+data/
+*.keras
+*.h5
+*.ckpt
+*.ckpt.data-*
+.ipynb_checkpoints/
+.DS_Store
+.env
+.venv/
+.vscode/
+.idea/

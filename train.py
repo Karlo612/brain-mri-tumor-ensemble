@@ -1,21 +1,21 @@
-import sys, pathlib
-PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
-if PROJECT_ROOT.as_posix() not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT.as_posix())
-
-import argparse, yaml
+import argparse
+import yaml
 from pathlib import Path
 
 import tensorflow as tf  # keep this at top-level
 
-from src.utils import set_global_determinism
-from src.datamodule import DataModule
-from src.model_factory import build_model, compile_model
+from brain_mri_tumor_ensemble.utils import set_global_determinism
+from brain_mri_tumor_ensemble.datamodule import DataModule
+from brain_mri_tumor_ensemble.model_factory import build_model, compile_model
+
+
+def _resolve(path_value: str, cfg_path: Path) -> Path:
+    path = Path(path_value)
+    return path if path.is_absolute() else (cfg_path.parent / path).resolve()
 
 
 def unfreeze_backbone_layers(model, n_last: int):
-    """Unfreeze last n_last layers of the conv backbone (before GAP)."""
-    # Find GAP layer index (start of dense head)
+    """Unfreeze last ``n_last`` convolutional layers before the GAP layer."""
     gap_idx = None
     for i, lyr in enumerate(model.layers):
         if isinstance(lyr, tf.keras.layers.GlobalAveragePooling2D):
@@ -24,29 +24,32 @@ def unfreeze_backbone_layers(model, n_last: int):
     if gap_idx is None:
         raise RuntimeError("Could not locate GlobalAveragePooling2D layer.")
 
-    backbone_layers = model.layers[:gap_idx]  # everything before GAP
-    # Unfreeze last n_last conv layers (skip BatchNorms)
+    backbone_layers = model.layers[:gap_idx]
     for lyr in backbone_layers[-n_last:]:
         if not isinstance(lyr, tf.keras.layers.BatchNormalization):
             lyr.trainable = True
-    # Keep BN frozen (often stabilises fine-tuning)
     for lyr in backbone_layers:
         if isinstance(lyr, tf.keras.layers.BatchNormalization):
             lyr.trainable = False
 
 
 def main(cfg_path: str, backbone: str):
-    # ---------- load config ----------
+    cfg_path = Path(cfg_path)
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"Config file not found: {cfg_path}")
+
     with open(cfg_path) as f:
         cfg = yaml.safe_load(f)
 
     set_global_determinism(cfg["seed"])
     dm = DataModule(cfg_path)
-    img_size     = tuple(cfg["img_size"])
-    num_classes  = len(dm.class_names)
+    img_size = tuple(cfg["img_size"])
+    num_classes = len(dm.class_names)
 
-    model_dir = Path(cfg["model_dir"])
+    model_dir = _resolve(cfg["model_dir"], cfg_path)
+    log_root = _resolve(cfg["log_dir"], cfg_path)
     model_dir.mkdir(parents=True, exist_ok=True)
+    log_root.mkdir(parents=True, exist_ok=True)
 
     # ---------- Phase 1 : head training ----------
     model = build_model(backbone, img_size, num_classes, base_trainable=False)
@@ -67,7 +70,7 @@ def main(cfg_path: str, backbone: str):
             verbose=1
         ),
         tf.keras.callbacks.TensorBoard(
-            log_dir=str(Path(cfg["log_dir"]) / f"{backbone}_head")
+            log_dir=str(log_root / f"{backbone}_head")
         )
     ]
 
@@ -85,7 +88,7 @@ def main(cfg_path: str, backbone: str):
 
     ckpt_ft = model_dir / f"{backbone}_finetune.keras"
     callbacks[1].filepath = str(ckpt_ft)
-    callbacks[2].log_dir  = str(Path(cfg["log_dir"]) / f"{backbone}_finetune")
+    callbacks[2].log_dir = str(log_root / f"{backbone}_finetune")
 
     model.fit(
         dm.train_ds,
@@ -95,13 +98,16 @@ def main(cfg_path: str, backbone: str):
         verbose=1
     )
 
-    print(f"✅ Finished training {backbone}. Head → {ckpt_head.name}, fine-tuned → {ckpt_ft.name}")
+    print(
+        f"✅ Finished training {backbone}. Head → {ckpt_head.name}, "
+        f"fine-tuned → {ckpt_ft.name}"
+    )
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--cfg",      default="src/config.yaml")
-    ap.add_argument("--backbone", choices=["xception","vgg16","efficientnetb0"],
+    ap.add_argument("--cfg", default="config.yaml")
+    ap.add_argument("--backbone", choices=["xception", "vgg16", "efficientnetb0"],
                     default="xception")
     args = ap.parse_args()
     main(args.cfg, args.backbone)

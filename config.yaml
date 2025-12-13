@@ -6,10 +6,10 @@ val_split: 0.15   # kept for compatibility; ignored because val dir exists
 class_mode: categorical
 
 # ---------- Directories ----------
-data_dir: /content/drive/MyDrive/Final_2025_Comp/SP/dataset_brain_split
-model_dir: /content/drive/MyDrive/Final_2025_Comp/SP/models
-log_dir: /content/drive/MyDrive/Final_2025_Comp/SP/models/logs
-plot_dir: /content/drive/MyDrive/Final_2025_Comp/SP/plots
+data_dir: data/dataset_brain_split
+model_dir: outputs/models
+log_dir: outputs/logs
+plot_dir: outputs/plots
 
 # ---------- Training ----------
 epochs_head: 15
