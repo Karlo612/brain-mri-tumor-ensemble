@@ -1,95 +1,78 @@
-"""
-Evaluate fine-tuned models and save confusion-matrix PNGs.
-Usage:
-    python eval.py --cfg config.yaml
-"""
-
+"""Evaluate all configured checkpoints and their mean-probability ensemble."""
 import argparse
-import sys
-import yaml
-import numpy as np
-import seaborn as sns
-import matplotlib.pyplot as plt
+import csv
 from pathlib import Path
-from sklearn.metrics import classification_report, confusion_matrix
+import numpy as np
 import tensorflow as tf
-
-from brain_mri_tumor_ensemble.utils import set_global_determinism
+from sklearn.metrics import accuracy_score, f1_score, confusion_matrix, ConfusionMatrixDisplay
+import matplotlib.pyplot as plt
 from brain_mri_tumor_ensemble.datamodule import DataModule
+from brain_mri_tumor_ensemble.utils import set_global_determinism
 
 
-def _resolve(path_value: str, cfg_path: Path) -> Path:
-    path = Path(path_value)
-    return path if path.is_absolute() else (cfg_path.parent / path).resolve()
+def expected_calibration_error(y, probabilities, bins=15):
+    confidence = probabilities.max(axis=1)
+    correct = probabilities.argmax(axis=1) == y
+    total = 0.0
+    for low, high in zip(np.linspace(0, 1, bins + 1)[:-1], np.linspace(0, 1, bins + 1)[1:]):
+        mask = (confidence > low) & (confidence <= high)
+        if mask.any():
+            total += mask.mean() * abs(correct[mask].mean() - confidence[mask].mean())
+    return float(total)
 
 
-# ----------------------------------------------------------------------
-def evaluate_one(model_path: Path, dm: DataModule, plot_dir: Path) -> bool:
-    if not model_path.exists():
-        print(f"⚠️  {model_path.name} not found — skipping")
-        return False
-
-    print(f"\n🧪 Evaluating {model_path.name}")
-    model = tf.keras.models.load_model(model_path)
-
-    loss, acc, prec, rec = model.evaluate(dm.test_ds, verbose=0)
-    print(f"  Acc={acc:.4f}  Prec={prec:.4f}  Rec={rec:.4f}")
-
-    y_prob, y_true = [], []
-    for batch_x, batch_y in dm.test_ds:
-        y_prob.append(model(batch_x, training=False).numpy())
-        y_true.append(batch_y.numpy())
-
-    y_prob = np.vstack(y_prob)
-    y_true = np.vstack(y_true)
-    y_pred = np.argmax(y_prob, axis=1)
-    y_true = np.argmax(y_true, axis=1)
-
-    print(classification_report(
-        y_true, y_pred, target_names=dm.class_names, digits=4))
-
-    cm = confusion_matrix(y_true, y_pred)
-    plt.figure(figsize=(6, 5))
-    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues",
-                xticklabels=dm.class_names, yticklabels=dm.class_names)
-    plt.title(f"Confusion — {model_path.stem}")
-    plt.ylabel("True"); plt.xlabel("Predicted"); plt.tight_layout()
-
-    plot_path = plot_dir / f"{model_path.stem}_cm.png"
-    plt.savefig(plot_path, dpi=300)
-    plt.close()
-    print(f"  → saved confusion matrix to {plot_path}")
-    return True
-
-
-# ----------------------------------------------------------------------
-def main(cfg_path: str):
-    cfg_path = Path(cfg_path)
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"Config file not found: {cfg_path}")
-
-    with open(cfg_path) as f:
-        cfg = yaml.safe_load(f)
-
-    set_global_determinism(cfg["seed"])
-    dm = DataModule(cfg_path)
-
-    plot_dir = _resolve(cfg["plot_dir"], cfg_path)
+def main(cfg_path):
+    cfg_path = Path(cfg_path).resolve()
+    dm = DataModule(str(cfg_path))
+    cfg = dm.cfg
+    set_global_determinism(cfg['seed'])
+    def resolve(value):
+        p = Path(value)
+        return p if p.is_absolute() else cfg_path.parent / p
+    model_dir, plot_dir = resolve(cfg['model_dir']), resolve(cfg['plot_dir'])
+    paths = [model_dir / f'{name}_finetune.keras' for name in cfg['backbones']]
+    missing = [str(p) for p in paths if not p.is_file()]
+    if missing:
+        raise FileNotFoundError('All ensemble checkpoints are required: ' + ', '.join(missing))
+    if len(paths) < 2 or len(set(paths)) != len(paths):
+        raise ValueError('Configure at least two distinct backbones')
+    models = [tf.keras.models.load_model(p, compile=False) for p in paths]
+    truth, per_model = [], [[] for _ in models]
+    # A single dataset traversal guarantees identical images/order for all models.
+    for images, labels in dm.test_ds:
+        truth.append(labels.numpy().argmax(axis=1))
+        for model, rows in zip(models, per_model):
+            rows.append(model(images, training=False).numpy())
+    y = np.concatenate(truth)
+    predictions = [np.concatenate(rows) for rows in per_model]
+    for probabilities in predictions:
+        if probabilities.shape != (len(y), len(dm.class_names)) or not np.isfinite(probabilities).all():
+            raise ValueError('Invalid prediction shape or nonfinite probabilities')
+        if (probabilities < 0).any() or (probabilities > 1).any() or not np.allclose(probabilities.sum(axis=1), 1, atol=1e-5):
+            raise ValueError('Expected class probabilities')
+    predictions.append(np.mean(predictions, axis=0))
     plot_dir.mkdir(parents=True, exist_ok=True)
-    model_dir = _resolve(cfg["model_dir"], cfg_path)
+    rows = []
+    for name, probabilities in zip(cfg['backbones'] + ['ensemble'], predictions):
+        predicted = probabilities.argmax(axis=1)
+        rows.append(dict(model=name, acc=float(accuracy_score(y, predicted)),
+                         f1_macro=float(f1_score(y, predicted, labels=range(len(dm.class_names)), average='macro', zero_division=0)),
+                         ECE=expected_calibration_error(y, probabilities), n_test_images=len(y)))
+        cm = confusion_matrix(y, predicted, labels=range(len(dm.class_names)))
+        ConfusionMatrixDisplay(cm, display_labels=dm.class_names).plot(xticks_rotation=45)
+        plt.tight_layout()
+        plt.savefig(plot_dir / f'{name}_cm.png', dpi=200)
+        plt.close()
+    destination = plot_dir / 'test_metrics_current.csv'
+    with destination.open('w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0]))
+        writer.writeheader(); writer.writerows(rows)
+    print(f'Saved new evaluation to {destination}; historical metrics were not overwritten.')
+    for row in rows:
+        print(row)
 
-    evaluated = [
-        evaluate_one(model_dir / f"{bb}_finetune.keras", dm, plot_dir)
-        for bb in cfg["backbones"]
-    ]
-    if not any(evaluated):
-        print("❌ No models were evaluated because no checkpoints were found.")
-        sys.exit(1)
 
-
-# ----------------------------------------------------------------------
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--cfg", default="config.yaml")
-    args = ap.parse_args()
-    main(args.cfg)
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--cfg', default='config.yaml')
+    main(parser.parse_args().cfg)

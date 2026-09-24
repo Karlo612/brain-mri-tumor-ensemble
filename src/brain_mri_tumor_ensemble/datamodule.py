@@ -37,37 +37,20 @@ class DataModule:
         val_dir = root / "val"
         test_dir = root / "test"
 
-        if train_dir.exists() and val_dir.exists():
-            self.train_ds = tf.keras.preprocessing.image_dataset_from_directory(
-                train_dir, labels="inferred", label_mode=class_mode,
-                image_size=img_size, batch_size=bs, shuffle=True, seed=seed
-            )
-            self.val_ds = tf.keras.preprocessing.image_dataset_from_directory(
-                val_dir, labels="inferred", label_mode=class_mode,
-                image_size=img_size, batch_size=bs, shuffle=False
-            )
-        else:
-            print("⚠️ No explicit train/val folders found. Falling back to validation_split.")
-            val_split = self.cfg["val_split"]
-            self.train_ds = tf.keras.preprocessing.image_dataset_from_directory(
-                root, labels="inferred", label_mode=class_mode,
-                validation_split=val_split, subset="training", seed=seed,
-                image_size=img_size, batch_size=bs
-            )
-            self.val_ds = tf.keras.preprocessing.image_dataset_from_directory(
-                root, labels="inferred", label_mode=class_mode,
-                validation_split=val_split, subset="validation", seed=seed,
-                image_size=img_size, batch_size=bs
-            )
-
-        if test_dir.exists():
-            self.test_ds = tf.keras.preprocessing.image_dataset_from_directory(
-                test_dir, labels="inferred", label_mode=class_mode,
-                image_size=img_size, batch_size=bs, shuffle=False
-            )
-        else:
-            print("⚠️  No test/ folder found – using validation split as stand-in test.")
-            self.test_ds = self.val_ds
+        missing = [str(p) for p in (train_dir, val_dir, test_dir) if not p.is_dir()]
+        if missing:
+            raise FileNotFoundError("Separate train, val and test folders are required: " + ", ".join(missing))
+        names = sorted(p.name for p in train_dir.iterdir() if p.is_dir())
+        for folder in (val_dir, test_dir):
+            if sorted(p.name for p in folder.iterdir() if p.is_dir()) != names:
+                raise ValueError("Class folders differ across splits")
+        def load(folder, shuffle):
+            return tf.keras.preprocessing.image_dataset_from_directory(
+                folder, labels="inferred", label_mode=class_mode, class_names=names,
+                image_size=img_size, batch_size=bs, shuffle=shuffle, seed=seed)
+        self.train_ds = load(train_dir, True)
+        self.val_ds = load(val_dir, False)
+        self.test_ds = load(test_dir, False)
 
         self._class_names = self.train_ds.class_names
 
